@@ -49,9 +49,11 @@ func (p *WorkerPool) Remove() error {
 // StarProcessing запускает обработку полученного слайса строк, если кол-во воркеров больше нуля,
 // иначе возвращает ошибку
 func (p *WorkerPool) StartProcessing(strs []string) error {
+	p.mu.Lock()
 	if p.workersCount == 0 {
 		return fmt.Errorf("запуск обработки не удался: кол-во воркеров равно 0")
 	}
+	p.mu.Unlock()
 
 	// создаем пул воркеров и заполняем его "токенами" (i)
 	pool := make(chan int, p.workersCount)
