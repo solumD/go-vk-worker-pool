@@ -64,7 +64,7 @@ func (p *WorkerPool) StartProcessing(strs []string) error {
 	// канал, куда будем записывать полученные строки
 	strChan := make(chan string)
 
-	// в горутине, пишем в канал строки из слайса
+	// в горутине пишем в канал строки из слайса
 	go func() {
 		for _, s := range strs {
 			strChan <- s
