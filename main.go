@@ -2,48 +2,50 @@ package main
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/solumD/go-vk-worker-pool/pool"
 )
 
 func main() {
-	strings := []string{"aaaaa", "bbbbb", "ccccc", "ddddd", "eeeee", "fffff"}
+	// Создаем пул с 3 воркерами и буфером на 10 задач
+	pool := pool.New(1, 1)
 
-	p := pool.New()
+	// Запускаем горутину для отправки задач
+	go func() {
+		for i := 0; i < 20; i++ {
+			task := fmt.Sprintf("task-%d", i)
+			if err := pool.SendTask(task); err != nil {
+				fmt.Printf("Error sending task %d: %v\n", i, err)
+			}
 
-	// добавляем воркеры
-	p.Add()
-	p.Add()
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
 
-	fmt.Println("Пример 1")
+	// Тестируем добавление/удаление воркеров
+	time.Sleep(300 * time.Millisecond)
+	pool.AddWorker()
+	fmt.Println("Added worker")
 
-	// запуск обработки, в выводе должны быть номера 1 и 2
-	if err := p.StartProcessing(strings); err != nil {
-		fmt.Println(err)
-	}
+	time.Sleep(300 * time.Millisecond)
+	pool.RemoveWorker()
+	fmt.Println("Removed worker")
 
-	fmt.Println("\nПример 2")
+	time.Sleep(300 * time.Millisecond)
+	pool.AddWorker()
+	fmt.Println("Added worker")
 
-	// удаляем воркера
-	if err := p.Remove(); err != nil {
-		fmt.Println(err)
-	}
+	// Даем время на обработку оставшихся задач
+	time.Sleep(1 * time.Second)
 
-	// еще раз запускаем обработку, в выводе должен быть только номер 1
-	if err := p.StartProcessing(strings); err != nil {
-		fmt.Println(err)
-	}
+	// Останавливаем пул
+	pool.StopPool()
+	fmt.Println("Pool stopped")
 
-	fmt.Println("\nПример 3")
-
-	// еще раз удаляем воркера (последнего)
-	if err := p.Remove(); err != nil {
-		fmt.Println(err)
-	}
-
-	// последний раз пытаемся запустить обработку, в выводе
-	// должна быть ошибка о недостаточном кол-ве воркеров
-	if err := p.StartProcessing(strings); err != nil {
+	// Пытаемся отправить задачу после остановки
+	err := pool.SendTask("should-fail")
+	if err != nil {
 		fmt.Println(err)
 	}
 }

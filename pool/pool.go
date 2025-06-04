@@ -1,91 +1,168 @@
 package pool
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
 )
 
-// Worker печатает в консоль строку и номер воркера
-func Worker(str string, workerNumber int) {
-	fmt.Printf("Обрабатываемая строка: %s, номер воркера: %d\n", str, workerNumber)
-}
+var errPoolIsStopped = fmt.Errorf("pool is stopped")
 
-// WorkerkPool пул из workersCount воркеров
+// WorkerPool пул из workersCount воркеров
 type WorkerPool struct {
+	workersCount atomic.Int64
+	stopped      bool
+	tasks        chan string
+	addSignal    chan struct{}
+	removeSignal chan struct{}
+	stopSignal   chan struct{}
 	mu           *sync.Mutex
-	workersCount int
+	wg           *sync.WaitGroup
 }
 
-// New возвращает новый объект WorkerPool
-func New() *WorkerPool {
-	return &WorkerPool{
+// New возвращает новый объект WorkerPool с заданным количеством воркеров (по умолчанию 1) и минимальным буфером задач (по умолчанию 1)
+func New(workersCount int, tasksBuffer int) *WorkerPool {
+	if workersCount < 1 {
+		workersCount = 1
+	}
+
+	if tasksBuffer < 1 {
+		tasksBuffer = 1
+	}
+
+	pool := &WorkerPool{
+		workersCount: atomic.Int64{},
+		stopped:      false,
+		tasks:        make(chan string, tasksBuffer),
+		addSignal:    make(chan struct{}),
+		removeSignal: make(chan struct{}),
+		stopSignal:   make(chan struct{}),
 		mu:           &sync.Mutex{},
-		workersCount: 0,
-	}
-}
-
-// Add добавляет воркер в пул (увеличивает их счетчик на 1)
-func (p *WorkerPool) Add() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	p.workersCount++
-}
-
-// Remove удаляет воркер из пула (уменьшает их счетчик на 1),
-// если их количество больше нуля, иначе возвращает ошибку
-func (p *WorkerPool) Remove() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.workersCount == 0 {
-		return fmt.Errorf("удаление воркера не удалось: текущее кол-во воркеров равно 0")
+		wg:           &sync.WaitGroup{},
 	}
 
-	p.workersCount--
+	pool.workersCount.Store(int64(workersCount))
+
+	go pool.startProcessing()
+
+	return pool
+}
+
+// AddWorker добавляет воркер в пул
+func (wp *WorkerPool) AddWorker() error {
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
+
+	if wp.stopped {
+		return fmt.Errorf("failed to add worker: %s", errPoolIsStopped)
+	}
+
+	wp.workersCount.Add(1)
+	wp.addSignal <- struct{}{}
+
 	return nil
 }
 
-// StarProcessing запускает обработку полученного слайса строк, если кол-во воркеров больше нуля,
-// иначе возвращает ошибку
-func (p *WorkerPool) StartProcessing(strs []string) error {
-	p.mu.Lock()
-	if p.workersCount == 0 {
-		return fmt.Errorf("запуск обработки не удался: кол-во воркеров равно 0")
-	}
-	p.mu.Unlock()
+// RemoveWorker удаляет воркер из пула
+func (wp *WorkerPool) RemoveWorker() error {
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
 
-	// создаем пул воркеров и заполняем его "токенами" (i)
-	pool := make(chan int, p.workersCount)
-	for i := 1; i <= p.workersCount; i++ {
-		pool <- i
+	if wp.stopped {
+		return fmt.Errorf("failed to remove worker: %s", errPoolIsStopped)
 	}
 
-	// канал, куда будем записывать полученные строки
-	strChan := make(chan string)
+	// должен быть минимум один воркер для корректной работы
+	if wp.workersCount.Load() == 1 {
+		return errors.New("failed to remove worker: minimum workers count is 1")
+	}
 
-	// в горутине пишем в канал строки из слайса
+	wp.workersCount.Add(-1)
+	wp.removeSignal <- struct{}{}
+
+	return nil
+}
+
+// StopPool останавливает весь пул
+func (wp *WorkerPool) StopPool() error {
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
+
+	if wp.stopped {
+		return fmt.Errorf("failed to stop pool: %s", errPoolIsStopped)
+	}
+
+	wp.stopped = true
+	close(wp.stopSignal)
+	close(wp.tasks)
+
+	return nil
+}
+
+// SendTask отправляет задачу в пул
+func (wp *WorkerPool) SendTask(task string) error {
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
+
+	if wp.stopped {
+		return fmt.Errorf("failed to send task: %s", errPoolIsStopped)
+	}
+
+	wp.tasks <- task
+	return nil
+}
+
+// startWorker запускает новый воркер в пуле
+func (wp *WorkerPool) startWorker(uuid string) {
+	wp.wg.Add(1)
 	go func() {
-		for _, s := range strs {
-			strChan <- s
+		defer wp.wg.Done()
+		for {
+			select {
+			case <-wp.removeSignal:
+				fmt.Printf("Worker %s was removed\n", uuid)
+				return
+
+			case <-wp.stopSignal:
+				fmt.Printf("Worker %s was stopped\n", uuid)
+				return
+
+			case task, ok := <-wp.tasks:
+				if !ok {
+					fmt.Printf("Worker %s stopped: tasks channel closed\n", uuid)
+					return
+				}
+
+				fmt.Printf("Tasks processed: %s. Worker's uuid: %s\n", task, uuid)
+				// имитация обработки
+				time.Sleep(100 * time.Millisecond)
+			}
 		}
-
-		close(strChan)
 	}()
+}
 
-	// читаем строки из канала
-	for str := range strChan {
-		workerID := <-pool // берем "токен"
-		go func() {
-			Worker(str, workerID)
-			pool <- workerID // возвращаем токен в пул
-		}()
+// startProcessing запускает пул
+func (wp *WorkerPool) startProcessing() {
+	// первый запуск
+	for i := 0; i < int(wp.workersCount.Load()); i++ {
+		wp.startWorker(uuid.New().String())
 	}
 
-	// ждем, когда все токены вернуться в пул
-	for i := 0; i < p.workersCount; i++ {
-		<-pool
+	// далее слушаем каналы и в зависимости от сигнала добавляем или удаляем воркера
+AddOrStopLoop:
+	for {
+		select {
+		case <-wp.addSignal:
+			wp.startWorker(uuid.New().String())
+
+		case <-wp.stopSignal:
+			break AddOrStopLoop
+		}
 	}
 
-	return nil
+	wp.wg.Wait()
 }
